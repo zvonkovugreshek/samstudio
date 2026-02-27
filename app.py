@@ -8,11 +8,18 @@
 #   4. Add HF_TOKEN in Settings → Secrets:
 #        HF_TOKEN = "hf_your_token_here"
 
+import os
+
+# Configure environment before any imports
+# Ultralytics tries to write config to ~/.config which is read-only on Streamlit Cloud
+os.environ.setdefault("YOLO_CONFIG_DIR", "/tmp/Ultralytics")
+# Disable auto-install of missing packages (fails due to permission errors on Cloud)
+os.environ.setdefault("YOLO_AUTOINSTALL", "false")
+
 import streamlit as st
 import numpy as np
 import cv2
 from PIL import Image
-import os
 import io
 import tempfile
 
