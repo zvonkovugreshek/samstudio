@@ -4,5 +4,6 @@ opencv-python-headless
 numpy
 Pillow
 huggingface_hub
+timm
 streamlit-drawable-canvas
 clip @ git+https://github.com/ultralytics/CLIP.git

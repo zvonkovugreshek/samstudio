@@ -109,10 +109,31 @@ def _patch_canvas_compat():
     """
     Monkeypatch for streamlit-drawable-canvas compatibility with Streamlit 1.50+.
     The canvas component calls an old image_to_url signature that was changed.
+    Tries multiple approaches for different Streamlit versions.
     """
+    import inspect
+
     try:
         import streamlit.elements.image as st_image
-        from streamlit.elements.lib.image_utils import image_to_url as real_image_to_url
+
+        # Check if image_to_url already exists with the old signature (no patch needed)
+        if hasattr(st_image, 'image_to_url'):
+            sig = inspect.signature(st_image.image_to_url)
+            params = list(sig.parameters.keys())
+            # Old signature has 'width' as 2nd param — canvas expects this
+            if len(params) >= 2 and params[1] == 'width':
+                return  # Already compatible, no patch needed
+
+        # Try to import the new-style function and wrap it
+        try:
+            from streamlit.elements.lib.image_utils import image_to_url as real_image_to_url
+        except ImportError:
+            # Very old Streamlit — image_to_url is already in the right place
+            return
+
+        # Inspect the real function's signature to adapt correctly
+        real_sig = inspect.signature(real_image_to_url)
+        real_params = list(real_sig.parameters.keys())
 
         def image_to_url_wrapper(
             image, width=None, clamp=False, channels="RGB",
@@ -120,15 +141,32 @@ def _patch_canvas_compat():
         ):
             class MockLayoutConfig:
                 def __init__(self, w):
-                    self.width = w
+                    self.width = w if w and w > 0 else -1
                     self.column_mismatch = False
 
             config = MockLayoutConfig(width)
-            return real_image_to_url(image, config, clamp, channels, output_format, image_id)
+
+            # Try the most common new signatures
+            try:
+                return real_image_to_url(image, config, clamp, channels, output_format, image_id)
+            except TypeError:
+                pass
+
+            try:
+                return real_image_to_url(image, config, output_format, image_id)
+            except TypeError:
+                pass
+
+            # Last resort: just call with positional args matching whatever it wants
+            try:
+                return real_image_to_url(image, width, clamp, channels, output_format, image_id)
+            except TypeError:
+                return ""
 
         st_image.image_to_url = image_to_url_wrapper
-    except (ImportError, AttributeError):
-        pass
+
+    except Exception:
+        pass  # If all patching fails, canvas may show black but won't crash
 
 
 # ─── Visualization Helpers ───────────────────────────────────────────────────
