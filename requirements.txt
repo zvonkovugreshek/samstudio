@@ -5,5 +5,5 @@ numpy
 Pillow
 huggingface_hub
 timm
-streamlit-drawable-canvas
+streamlit-image-coordinates
 clip @ git+https://github.com/ultralytics/CLIP.git

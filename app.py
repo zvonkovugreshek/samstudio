@@ -103,70 +103,21 @@ def _has_cuda():
         return False
 
 
-# ─── Canvas Monkeypatch ─────────────────────────────────────────────────────
+# ─── Point Drawing Helper ────────────────────────────────────────────────────
 
-def _patch_canvas_compat():
-    """
-    Monkeypatch for streamlit-drawable-canvas compatibility with Streamlit 1.50+.
-    The canvas component calls an old image_to_url signature that was changed.
-    Tries multiple approaches for different Streamlit versions.
-    """
-    import inspect
-
-    try:
-        import streamlit.elements.image as st_image
-
-        # Check if image_to_url already exists with the old signature (no patch needed)
-        if hasattr(st_image, 'image_to_url'):
-            sig = inspect.signature(st_image.image_to_url)
-            params = list(sig.parameters.keys())
-            # Old signature has 'width' as 2nd param — canvas expects this
-            if len(params) >= 2 and params[1] == 'width':
-                return  # Already compatible, no patch needed
-
-        # Try to import the new-style function and wrap it
-        try:
-            from streamlit.elements.lib.image_utils import image_to_url as real_image_to_url
-        except ImportError:
-            # Very old Streamlit — image_to_url is already in the right place
-            return
-
-        # Inspect the real function's signature to adapt correctly
-        real_sig = inspect.signature(real_image_to_url)
-        real_params = list(real_sig.parameters.keys())
-
-        def image_to_url_wrapper(
-            image, width=None, clamp=False, channels="RGB",
-            output_format="JPEG", image_id=None, allow_emoji=False
-        ):
-            class MockLayoutConfig:
-                def __init__(self, w):
-                    self.width = w if w and w > 0 else -1
-                    self.column_mismatch = False
-
-            config = MockLayoutConfig(width)
-
-            # Try the most common new signatures
-            try:
-                return real_image_to_url(image, config, clamp, channels, output_format, image_id)
-            except TypeError:
-                pass
-
-            try:
-                return real_image_to_url(image, config, output_format, image_id)
-            except TypeError:
-                pass
-
-            # Last resort: just call with positional args matching whatever it wants
-            try:
-                return real_image_to_url(image, width, clamp, channels, output_format, image_id)
-            except TypeError:
-                return ""
-
-        st_image.image_to_url = image_to_url_wrapper
-
-    except Exception:
-        pass  # If all patching fails, canvas may show black but won't crash
+def draw_points_on_image(image_pil, points, radius=8):
+    """Draw red circles on the image at the given point coordinates."""
+    from PIL import ImageDraw
+    img = image_pil.copy()
+    draw = ImageDraw.Draw(img)
+    for i, (x, y) in enumerate(points):
+        draw.ellipse(
+            [x - radius, y - radius, x + radius, y + radius],
+            fill="#FF6B35", outline="white", width=2,
+        )
+        # Draw number label
+        draw.text((x + radius + 3, y - radius), str(i + 1), fill="white")
+    return img
 
 
 # ─── Visualization Helpers ───────────────────────────────────────────────────
@@ -397,97 +348,101 @@ def main():
 
     # ── INTERACTIVE POINT MODE ──
     if mode == "Interactive Point":
-        st.info("☝️ Click on the image to place points, then press **Segment Points**.")
+        st.info("☝️ Click on the image to add points, then press **Segment Points**.")
 
-        _patch_canvas_compat()
+        from streamlit_image_coordinates import streamlit_image_coordinates
 
-        try:
-            from streamlit_drawable_canvas import st_canvas
-        except ImportError:
-            st.error(
-                "Module `streamlit-drawable-canvas` not found.\n\n"
-                "Install with: `pip install streamlit-drawable-canvas`"
-            )
-            st.stop()
-
-        canvas_width = 700
         w, h = image_pil.size
-        canvas_height = int(h * (canvas_width / w))
 
-        canvas_result = st_canvas(
-            fill_color="rgba(255, 165, 0, 0.3)",
-            stroke_width=3,
-            stroke_color="#FF6B35",
-            background_image=image_pil,
-            update_streamlit=True,
-            height=canvas_height,
-            width=canvas_width,
-            drawing_mode="point",
-            key="canvas",
+        # Initialize session state for points
+        if "click_points" not in st.session_state:
+            st.session_state.click_points = []
+        if "interactive_result" not in st.session_state:
+            st.session_state.interactive_result = None
+
+        # Draw existing points on image for display
+        display_img = draw_points_on_image(image_pil, st.session_state.click_points)
+
+        # Resize for display (keep aspect ratio, max 700px wide)
+        display_width = min(700, w)
+        display_height = int(h * (display_width / w))
+        display_img_resized = display_img.resize((display_width, display_height), Image.LANCZOS)
+
+        # Clickable image
+        coords = streamlit_image_coordinates(
+            display_img_resized,
+            key="img_coords",
         )
 
-        if canvas_result.json_data is not None:
-            objects = canvas_result.json_data["objects"]
+        # Handle new click
+        if coords is not None:
+            # Scale from display coords back to original image coords
+            scale_x = w / display_width
+            scale_y = h / display_height
+            real_x = coords["x"] * scale_x
+            real_y = coords["y"] * scale_y
 
-            if len(objects) > 0:
-                scale_x = w / canvas_width
-                scale_y = h / canvas_height
+            new_point = [real_x, real_y]
 
-                points = []
-                labels = []
+            # Only add if it's a new click (not a duplicate from rerun)
+            if (len(st.session_state.click_points) == 0 or
+                st.session_state.click_points[-1] != new_point):
+                st.session_state.click_points.append(new_point)
+                st.rerun()
 
-                for obj in objects:
-                    if obj["type"] == "circle":
-                        x = (obj["left"] + obj["radius"]) * scale_x
-                        y = (obj["top"] + obj["radius"]) * scale_y
-                        points.append([x, y])
-                        labels.append(1)
+        # Show point count and controls
+        n_pts = len(st.session_state.click_points)
+        if n_pts > 0:
+            col_info, col_clear = st.columns([3, 1])
+            col_info.caption(f"**{n_pts}** point(s) selected")
+            if col_clear.button("❌ Clear Points"):
+                st.session_state.click_points = []
+                st.session_state.interactive_result = None
+                st.rerun()
 
-                st.caption(f"**{len(points)}** point(s) selected")
+            if st.button("🔍 Segment Points", type="primary"):
+                with st.spinner("Segmenting..."):
+                    try:
+                        tmp_path, tmp_dir = save_image_to_temp(image_pil)
 
-                if "interactive_result" not in st.session_state:
-                    st.session_state.interactive_result = None
+                        points = st.session_state.click_points
+                        labels = [1] * len(points)  # All foreground
 
-                if st.button("🔍 Segment Points", type="primary"):
-                    with st.spinner("Segmenting..."):
+                        model = load_sam_model(model_path)
+                        results = model.predict(
+                            source=tmp_path,
+                            points=points,
+                            labels=labels,
+                            verbose=False,
+                        )
+
+                        masks_np = extract_masks_from_results(results)
+
+                        if masks_np is not None and len(masks_np) > 0:
+                            st.session_state.interactive_result = {
+                                "image_pil": image_pil,
+                                "image_np": image_np,
+                                "masks": masks_np,
+                            }
+                        else:
+                            st.session_state.interactive_result = None
+                            st.warning("No segments found at the selected point(s).")
+
                         try:
-                            tmp_path, tmp_dir = save_image_to_temp(image_pil)
+                            os.remove(tmp_path)
+                            os.rmdir(tmp_dir)
+                        except OSError:
+                            pass
 
-                            model = load_sam_model(model_path)
-                            results = model.predict(
-                                source=tmp_path,
-                                points=points,
-                                labels=labels,
-                                verbose=False,
-                            )
+                    except Exception as e:
+                        st.error(f"Segmentation error: {e}")
 
-                            masks_np = extract_masks_from_results(results)
-
-                            if masks_np is not None and len(masks_np) > 0:
-                                st.session_state.interactive_result = {
-                                    "image_pil": image_pil,
-                                    "image_np": image_np,
-                                    "masks": masks_np,
-                                }
-                            else:
-                                st.session_state.interactive_result = None
-                                st.warning("No segments found at the selected point(s).")
-
-                            try:
-                                os.remove(tmp_path)
-                                os.rmdir(tmp_dir)
-                            except OSError:
-                                pass
-
-                        except Exception as e:
-                            st.error(f"Segmentation error: {e}")
-
-                if st.session_state.interactive_result:
-                    res = st.session_state.interactive_result
-                    render_results(
-                        res["image_pil"], res["image_np"], res["masks"],
-                        caption="Point Segmentation Result", prefix="point"
-                    )
+        if st.session_state.interactive_result:
+            res = st.session_state.interactive_result
+            render_results(
+                res["image_pil"], res["image_np"], res["masks"],
+                caption="Point Segmentation Result", prefix="point"
+            )
 
     # ── TEXT PROMPT MODE ──
     elif mode == "Text Prompt":
