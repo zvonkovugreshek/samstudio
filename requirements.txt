@@ -1,0 +1,8 @@
+streamlit
+ultralytics>=8.3.237
+opencv-python-headless
+numpy
+Pillow
+huggingface_hub
+streamlit-drawable-canvas
+clip @ git+https://github.com/ultralytics/CLIP.git
